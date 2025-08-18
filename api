@@ -1,0 +1,6 @@
+fluancy-proxy/
+├─ api/
+│  ├─ health.js
+│  └─ flight-offers.js
+├─ package.json
+└─ README.md (optional)
