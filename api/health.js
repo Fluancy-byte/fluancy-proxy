@@ -1,5 +1,5 @@
-// api/health.js  (CommonJS)
-module.exports = (req, res) => {
+// ESM health check
+export default function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.status(200).json({
     ok: true,
@@ -11,4 +11,4 @@ module.exports = (req, res) => {
     },
     now: new Date().toISOString(),
   });
-};
+}
