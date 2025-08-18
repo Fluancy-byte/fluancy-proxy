@@ -1,88 +1,74 @@
-// /api/flights
-// Accepts GET (recommended) or POST with:
-// origin, destination, depart, ret (optional), adults, cabin
-
-const allowCORS = (res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-};
-
+// /api/flights.js
 export default async function handler(req, res) {
-  allowCORS(res);
-  if (req.method === 'OPTIONS') return res.status(200).end();
-
   try {
-    const params = req.method === 'GET'
-      ? req.query
-      : (JSON.parse(req.body || '{}'));
-
     const {
-      origin,
-      destination,
-      depart,
+      origin = '',
+      destination = '',
+      depart = '',
       ret = '',
-      adults = 1,
+      adults = '1',
       cabin = 'ECONOMY'
-    } = params;
+    } = req.query;
 
+    // Validate minimal input
     if (!origin || !destination || !depart) {
-      return res.status(400).json({ ok: false, error: 'Missing origin/destination/depart' });
+      return res.status(400).json({ error: 'Missing origin/destination/depart' });
     }
 
-    const base =
-      (process.env.AMADEUS_ENV || 'test') === 'production'
-        ? 'https://api.amadeus.com'
-        : 'https://test.api.amadeus.com';
-
-    // 1) OAuth token
-    const tokenResp = await fetch(`${base}/v1/security/oauth2/token`, {
+    // ---> 1) Get Amadeus OAuth token
+    const tokenRes = await fetch('https://test.api.amadeus.com/v1/security/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'client_credentials',
-        client_id: process.env.AMADEUS_CLIENT_ID,
-        client_secret: process.env.AMADEUS_CLIENT_SECRET
-      }).toString()
+        client_id: process.env.AMADEUS_API_KEY,
+        client_secret: process.env.AMADEUS_API_SECRET
+      })
     });
 
-    const tokenJson = await tokenResp.json();
-    const token = tokenJson.access_token;
-    if (!token) {
-      return res.status(502).json({ ok: false, error: 'Amadeus auth failed', details: tokenJson });
+    if (!tokenRes.ok) {
+      const t = await tokenRes.text();
+      return res.status(500).json({ error: 'Amadeus token error', detail: t });
     }
 
-    // 2) Flight offers
-    const url = new URL(`${base}/v2/shopping/flight-offers`);
-    url.search = new URLSearchParams({
-      originLocationCode: String(origin).toUpperCase(),
-      destinationLocationCode: String(destination).toUpperCase(),
-      departureDate: depart,                 // YYYY-MM-DD
-      ...(ret ? { returnDate: ret } : {}),
-      adults: String(adults),
-      travelClass: String(cabin).toUpperCase(), // ECONOMY | PREMIUM_ECONOMY | BUSINESS | FIRST
+    const { access_token } = await tokenRes.json();
+
+    // ---> 2) Search flight offers
+    // NOTE: max=50 lets us get a decent set then we trim.
+    const searchUrl = new URL('https://test.api.amadeus.com/v2/shopping/flight-offers');
+    const params = {
+      originLocationCode: origin.toUpperCase(),
+      destinationLocationCode: destination.toUpperCase(),
+      departureDate: depart,                // YYYY-MM-DD
+      adults: String(Math.max(1, Number(adults || 1))),
+      travelClass: cabin.toUpperCase(),     // ECONOMY | PREMIUM_ECONOMY | BUSINESS | FIRST
       currencyCode: 'USD',
       nonStop: 'false',
-      max: '20'
-    }).toString();
+      max: '50'
+    };
+    if (ret) params.returnDate = ret;       // add when round-trip
 
-    const offersResp = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` }
+    Object.entries(params).forEach(([k, v]) => searchUrl.searchParams.set(k, v));
+
+    const offerRes = await fetch(searchUrl.toString(), {
+      headers: { Authorization: `Bearer ${access_token}` }
     });
-    const data = await offersResp.json();
 
-    // Find the cheapest total price
-    const minPrice = Array.isArray(data?.data)
-      ? data.data.reduce((min, o) => Math.min(min, Number(o?.price?.total || Infinity)), Infinity)
-      : null;
+    if (!offerRes.ok) {
+      const t = await offerRes.text();
+      return res.status(502).json({ error: 'Amadeus offers error', detail: t });
+    }
 
-    res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate=60');
-    res.status(200).json({
-      ok: true,
-      minPrice: isFinite(minPrice) ? Number(minPrice) : null,
-      sample: Array.isArray(data?.data) ? data.data[0] : null // helpful while testing
-    });
+    const json = await offerRes.json();
+
+    // Amadeus returns { data: [ ...offers ], dictionaries: {...} }
+    const offers = Array.isArray(json.data) ? json.data : [];
+
+    // Return a simple envelope the front-end understands (it also accepts array root)
+    return res.status(200).json({ offers: offers.slice(0, 8) });
+
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message || 'Unknown error' });
+    console.error(err);
+    return res.status(500).json({ error: 'Server error', detail: String(err) });
   }
 }
