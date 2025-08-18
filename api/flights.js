@@ -1,74 +1,114 @@
 // /api/flights.js
-export default async function handler(req, res) {
+export const config = { runtime: 'edge' };
+
+const AM_ENV = (process.env.AMADEUS_ENV || 'test').toLowerCase();
+const BASE   = AM_ENV === 'production'
+  ? 'https://api.amadeus.com'
+  : 'https://test.api.amadeus.com';
+
+async function getToken() {
+  const id  = process.env.AMADEUS_CLIENT_ID;
+  const sec = process.env.AMADEUS_CLIENT_SECRET;
+  if (!id || !sec) {
+    return { error: 'Missing AMADEUS_CLIENT_ID/AMADEUS_CLIENT_SECRET in env' };
+  }
+
+  const res = await fetch(`${BASE}/v1/security/oauth2/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: id,
+      client_secret: sec
+    })
+  });
+
+  if (!res.ok) {
+    const msg = await res.text();
+    return { error: 'Amadeus token error', detail: msg };
+  }
+  return res.json();
+}
+
+function toISO(d) {
+  // allow YYYY-MM-DD, or something date-like; Amadeus expects YYYY-MM-DD
+  if (!d) return '';
+  return String(d).slice(0, 10);
+}
+
+export default async function handler(req) {
   try {
-    const {
-      origin = '',
-      destination = '',
-      depart = '',
-      ret = '',
-      adults = '1',
-      cabin = 'ECONOMY'
-    } = req.query;
+    const { searchParams } = new URL(req.url);
+    const origin = (searchParams.get('origin') || '').trim().toUpperCase();
+    const destination = (searchParams.get('destination') || '').trim().toUpperCase();
+    const depart = toISO(searchParams.get('depart'));
+    const ret    = toISO(searchParams.get('ret'));
+    const adults = Math.max(1, Number(searchParams.get('adults') || '1'));
+    const cabin  = (searchParams.get('cabin') || 'ECONOMY').toUpperCase();
 
-    // Validate minimal input
-    if (!origin || !destination || !depart) {
-      return res.status(400).json({ error: 'Missing origin/destination/depart' });
+    if (!origin || !destination || !depart || !ret) {
+      return new Response(JSON.stringify({ error:'Missing required params' }), { status: 400 });
     }
 
-    // ---> 1) Get Amadeus OAuth token
-    const tokenRes = await fetch('https://test.api.amadeus.com/v1/security/oauth2/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: process.env.AMADEUS_API_KEY,
-        client_secret: process.env.AMADEUS_API_SECRET
-      })
-    });
-
-    if (!tokenRes.ok) {
-      const t = await tokenRes.text();
-      return res.status(500).json({ error: 'Amadeus token error', detail: t });
+    const token = await getToken();
+    if (token.error) {
+      return new Response(JSON.stringify(token), { status: 401 });
     }
 
-    const { access_token } = await tokenRes.json();
-
-    // ---> 2) Search flight offers
-    // NOTE: max=50 lets us get a decent set then we trim.
-    const searchUrl = new URL('https://test.api.amadeus.com/v2/shopping/flight-offers');
-    const params = {
-      originLocationCode: origin.toUpperCase(),
-      destinationLocationCode: destination.toUpperCase(),
-      departureDate: depart,                // YYYY-MM-DD
-      adults: String(Math.max(1, Number(adults || 1))),
-      travelClass: cabin.toUpperCase(),     // ECONOMY | PREMIUM_ECONOMY | BUSINESS | FIRST
+    // Amadeus Flight Offers Search v2
+    const qs = new URLSearchParams({
+      originLocationCode: origin,
+      destinationLocationCode: destination,
+      departureDate: depart,
+      returnDate: ret,
+      adults: String(adults),
+      travelClass: cabin,
       currencyCode: 'USD',
-      nonStop: 'false',
-      max: '50'
-    };
-    if (ret) params.returnDate = ret;       // add when round-trip
-
-    Object.entries(params).forEach(([k, v]) => searchUrl.searchParams.set(k, v));
-
-    const offerRes = await fetch(searchUrl.toString(), {
-      headers: { Authorization: `Bearer ${access_token}` }
+      max: '20'                   // get enough to choose top 3–4
     });
 
-    if (!offerRes.ok) {
-      const t = await offerRes.text();
-      return res.status(502).json({ error: 'Amadeus offers error', detail: t });
+    const r = await fetch(`${BASE}/v2/shopping/flight-offers?${qs}`, {
+      headers: { Authorization: `Bearer ${token.access_token}` }
+    });
+
+    const data = await r.json();
+    if (!r.ok) {
+      return new Response(JSON.stringify({ error:'Amadeus search error', detail: data }), { status: r.status });
     }
 
-    const json = await offerRes.json();
+    // Map to a compact shape our front-end expects
+    const offers = (data.data || []).map((o, idx) => {
+      const price = Number(o.price?.grandTotal || o.price?.total || 0);
+      const validating = (o.validatingAirlineCodes && o.validatingAirlineCodes[0]) || null;
 
-    // Amadeus returns { data: [ ...offers ], dictionaries: {...} }
-    const offers = Array.isArray(json.data) ? json.data : [];
+      // Human-friendly out/back stops and durations
+      const segsOut = o.itineraries?.[0]?.segments || [];
+      const segsRet = o.itineraries?.[1]?.segments || [];
 
-    // Return a simple envelope the front-end understands (it also accepts array root)
-    return res.status(200).json({ offers: offers.slice(0, 8) });
+      const outStops = Math.max(0, segsOut.length - 1);
+      const retStops = Math.max(0, segsRet.length - 1);
+      const outDur   = o.itineraries?.[0]?.duration || '';
+      const retDur   = o.itineraries?.[1]?.duration || '';
+
+      return {
+        id: String(idx + 1),
+        airline: validating || 'Mixed carriers',
+        price,
+        outStops,
+        retStops,
+        outDuration: outDur.replace('PT','').toLowerCase(),  // e.g. 6H15M → 6h15m
+        retDuration: retDur.replace('PT','').toLowerCase(),
+      };
+    }).filter(x => x.price > 0);
+
+    // Sort by price low→high
+    offers.sort((a,b)=>a.price - b.price);
+
+    return new Response(JSON.stringify({ ok: true, offers }), {
+      headers: { 'Content-Type':'application/json', 'Cache-Control':'no-store' }
+    });
 
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Server error', detail: String(err) });
+    return new Response(JSON.stringify({ error:'Server error', detail: String(err) }), { status: 500 });
   }
 }
