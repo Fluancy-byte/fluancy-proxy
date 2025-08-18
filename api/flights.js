@@ -1,13 +1,6 @@
-// api/flights.js
-/**
- * Vercel Serverless Function (CommonJS) – Amadeus Flight Offers proxy
- * Env (Production): AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET
- * Optional: AMADEUS_HOST (defaults to Amadeus TEST API)
- */
-
+// Amadeus Flight Offers proxy (ESM)
 const HOST = process.env.AMADEUS_HOST || 'https://test.api.amadeus.com';
 
-// ---- CORS ----
 const ALLOW_ORIGINS = [
   'https://fluancy.com',
   'https://www.fluancy.com',
@@ -31,9 +24,7 @@ async function safeJson(resp) {
 async function getToken() {
   const id = process.env.AMADEUS_CLIENT_ID;
   const secret = process.env.AMADEUS_CLIENT_SECRET;
-  if (!id || !secret) {
-    throw new Error('Missing AMADEUS_CLIENT_ID or AMADEUS_CLIENT_SECRET (check Vercel → Settings → Environment Variables → Production)');
-  }
+  if (!id || !secret) throw new Error('Missing AMADEUS_CLIENT_ID or AMADEUS_CLIENT_SECRET');
 
   const resp = await fetch(`${HOST}/v1/security/oauth2/token`, {
     method: 'POST',
@@ -71,10 +62,9 @@ function mapAmadeusToLight(offers) {
   }));
 }
 
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   setCors(res, req.headers.origin || '');
 
-  // Preflight
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
@@ -120,4 +110,4 @@ module.exports = async function handler(req, res) {
     console.error('Proxy failed:', err);
     return res.status(500).json({ error: 'Proxy failed', detail: String(err.message || err) });
   }
-};
+}
