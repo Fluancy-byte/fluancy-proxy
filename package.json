@@ -4,6 +4,10 @@
   "version": "1.0.0",
   "description": "Vercel serverless proxy for Amadeus",
   "type": "module",
-  "engines": { "node": "22.x" },
-  "dependencies": {}
+  "engines": {
+    "node": "22.x"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
 }
