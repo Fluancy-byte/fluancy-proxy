@@ -1,5 +1,5 @@
 // api/flights.js
-const fetch = require('node-fetch');
+import fetch from 'node-fetch';
 
 const HOST = process.env.AMADEUS_HOST || 'https://test.api.amadeus.com';
 
@@ -46,7 +46,7 @@ function mapAmadeusToLight(offers) {
   }));
 }
 
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   setCors(res, req.headers.origin || '');
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
@@ -74,4 +74,4 @@ module.exports = async function handler(req, res) {
     console.error('Flight fetch error:', err);
     return res.status(500).json({ error: 'Server error', message: err.message });
   }
-};
+}
